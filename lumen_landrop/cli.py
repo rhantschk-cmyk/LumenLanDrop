@@ -1,0 +1,164 @@
+"""HTTP protocol and CLI for Lumen LAN Drop."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import shutil
+import sys
+import tempfile
+import threading
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from .archive import TransferError, build_archive, extract_archive_safely, sha256_file
+
+
+class DropServer(ThreadingHTTPServer):
+    def __init__(self, address, handler, token: str, output: Path):
+        super().__init__(address, handler)
+        self.token = token
+        self.output = output
+
+
+class DropHandler(BaseHTTPRequestHandler):
+    server: DropServer
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def _reply(self, code: int, payload: dict) -> None:
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def do_GET(self) -> None:
+        if self.path != "/health":
+            self._reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        self._reply(HTTPStatus.OK, {"service": "lumen-landrop", "status": "ok"})
+
+    def do_POST(self) -> None:
+        if self.path != "/upload":
+            self._reply(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+        if not secrets.compare_digest(self.headers.get("X-LumenLanDrop-Token", ""), self.server.token):
+            self._reply(HTTPStatus.UNAUTHORIZED, {"error": "invalid token"})
+            return
+        length = self.headers.get("Content-Length")
+        if not length or not length.isdigit() or int(length) <= 0:
+            self._reply(HTTPStatus.BAD_REQUEST, {"error": "a positive Content-Length is required"})
+            return
+        self.server.output.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".lumen-landrop-", dir=self.server.output) as temporary:
+            staging = Path(temporary) / "payload"
+            staging.mkdir()
+            archive_path = Path(temporary) / "upload.tar"
+            remaining = int(length)
+            with archive_path.open("xb") as archive:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        self._reply(HTTPStatus.BAD_REQUEST, {"error": "truncated upload"})
+                        return
+                    archive.write(chunk)
+                    remaining -= len(chunk)
+            actual_sha256 = sha256_file(archive_path)
+            expected_sha256 = self.headers.get("X-LumenLanDrop-SHA256", "")
+            if not expected_sha256 or not secrets.compare_digest(actual_sha256, expected_sha256):
+                self._reply(HTTPStatus.BAD_REQUEST, {"error": "archive checksum mismatch"})
+                return
+            try:
+                with archive_path.open("rb") as archive:
+                    files, _ = extract_archive_safely(archive, staging)
+            except (OSError, TransferError) as exc:
+                self._reply(HTTPStatus.BAD_REQUEST, {"error": f"unsafe upload: {exc}"})
+                return
+            transfer_name = datetime.now(timezone.utc).strftime("drop-%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
+            final = self.server.output / transfer_name
+            os.replace(staging, final)
+            self._reply(HTTPStatus.CREATED, {"sha256": actual_sha256, "files": files, "path": str(final)})
+
+
+def serve(host: str, port: int, token: str, output: Path) -> None:
+    server = DropServer((host, port), DropHandler, token, output)
+    print(f"Lumen LAN Drop listening on http://{host}:{port}; output: {output}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nLumen LAN Drop stopped.", flush=True)
+    finally:
+        server.server_close()
+
+
+def send(target: str, token: str, paths: list[str]) -> dict:
+    sources = [Path(path).expanduser().resolve() for path in paths]
+    with tempfile.TemporaryDirectory(prefix="lumen-landrop-") as temporary:
+        archive = Path(temporary) / "payload.tar"
+        build_archive(sources, archive)
+        digest = sha256_file(archive)
+        data = archive.read_bytes()
+    endpoint = target.rstrip("/") + "/upload"
+    request = urllib.request.Request(
+        endpoint,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-tar",
+            "Content-Length": str(len(data)),
+            "X-LumenLanDrop-Token": token,
+            "X-LumenLanDrop-SHA256": digest,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise TransferError(f"receiver rejected transfer ({exc.code}): {body}") from exc
+    except urllib.error.URLError as exc:
+        raise TransferError(f"cannot reach receiver: {exc.reason}") from exc
+    if result.get("sha256") != digest:
+        raise TransferError("receiver acknowledgement checksum mismatch")
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="lumen-landrop", description="Token-protected local LAN/Tailnet file drop.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("token", help="generate a secure receiver token")
+    serve_parser = sub.add_parser("serve", help="receive files")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8765)
+    serve_parser.add_argument("--token", required=True)
+    serve_parser.add_argument("--output", required=True, type=Path)
+    send_parser = sub.add_parser("send", help="send files or directories")
+    send_parser.add_argument("--to", required=True)
+    send_parser.add_argument("--token", required=True)
+    send_parser.add_argument("paths", nargs="+")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "token":
+            print(secrets.token_urlsafe(32))
+            return 0
+        if args.command == "serve":
+            serve(args.host, args.port, args.token, args.output.expanduser().resolve())
+            return 0
+        result = send(args.to, args.token, args.paths)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except (OSError, TransferError) as exc:
+        print(f"lumen-landrop: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
