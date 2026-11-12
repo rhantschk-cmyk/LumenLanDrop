@@ -19,11 +19,22 @@ from pathlib import Path
 from .archive import TransferError, build_archive, extract_archive_safely, sha256_file
 
 
+DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024
+
+
 class DropServer(ThreadingHTTPServer):
-    def __init__(self, address, handler, token: str, output: Path):
+    def __init__(
+        self,
+        address,
+        handler,
+        token: str,
+        output: Path,
+        max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
+    ):
         super().__init__(address, handler)
         self.token = token
         self.output = output
+        self.max_upload_bytes = max_upload_bytes
 
 
 class DropHandler(BaseHTTPRequestHandler):
@@ -57,12 +68,19 @@ class DropHandler(BaseHTTPRequestHandler):
         if not length or not length.isdigit() or int(length) <= 0:
             self._reply(HTTPStatus.BAD_REQUEST, {"error": "a positive Content-Length is required"})
             return
+        content_length = int(length)
+        if content_length > self.server.max_upload_bytes:
+            self._reply(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"error": "upload exceeds receiver size limit"},
+            )
+            return
         self.server.output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".lumen-landrop-", dir=self.server.output) as temporary:
             staging = Path(temporary) / "payload"
             staging.mkdir()
             archive_path = Path(temporary) / "upload.tar"
-            remaining = int(length)
+            remaining = content_length
             with archive_path.open("xb") as archive:
                 while remaining:
                     chunk = self.rfile.read(min(1024 * 1024, remaining))
@@ -88,8 +106,10 @@ class DropHandler(BaseHTTPRequestHandler):
             self._reply(HTTPStatus.CREATED, {"sha256": actual_sha256, "files": files, "path": str(final)})
 
 
-def serve(host: str, port: int, token: str, output: Path) -> None:
-    server = DropServer((host, port), DropHandler, token, output)
+def serve(host: str, port: int, token: str, output: Path, max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES) -> None:
+    if max_upload_bytes <= 0:
+        raise TransferError("max upload size must be positive")
+    server = DropServer((host, port), DropHandler, token, output, max_upload_bytes)
     print(f"Lumen LAN Drop listening on http://{host}:{port}; output: {output}", flush=True)
     try:
         server.serve_forever()
@@ -140,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--port", type=int, default=8765)
     serve_parser.add_argument("--token", required=True)
     serve_parser.add_argument("--output", required=True, type=Path)
+    serve_parser.add_argument(
+        "--max-upload-bytes",
+        type=int,
+        default=DEFAULT_MAX_UPLOAD_BYTES,
+        help="maximum accepted archive size in bytes (default: 10 GiB)",
+    )
     send_parser = sub.add_parser("send", help="send files or directories")
     send_parser.add_argument("--to", required=True)
     send_parser.add_argument("--token", required=True)
@@ -150,7 +176,13 @@ def main(argv: list[str] | None = None) -> int:
             print(secrets.token_urlsafe(32))
             return 0
         if args.command == "serve":
-            serve(args.host, args.port, args.token, args.output.expanduser().resolve())
+            serve(
+                args.host,
+                args.port,
+                args.token,
+                args.output.expanduser().resolve(),
+                args.max_upload_bytes,
+            )
             return 0
         result = send(args.to, args.token, args.paths)
         print(json.dumps(result, indent=2, sort_keys=True))

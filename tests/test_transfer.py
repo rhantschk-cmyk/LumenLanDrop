@@ -3,7 +3,8 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from lumen_landrop.cli import DropHandler, DropServer, send
 
@@ -32,6 +33,36 @@ class LanDropTests(unittest.TestCase):
         self.assertIn("sha256", result)
         received = Path(result["path"]) / "exports" / "video.txt"
         self.assertEqual(received.read_text(encoding="utf-8"), "ready")
+
+    def test_rejects_oversized_upload_before_creating_output(self):
+        limited_output = Path(self.temporary.name) / "limited-received"
+        limited_server = DropServer(
+            ("127.0.0.1", 0),
+            DropHandler,
+            "test-token",
+            limited_output,
+            max_upload_bytes=1,
+        )
+        limited_thread = threading.Thread(target=limited_server.serve_forever, daemon=True)
+        limited_thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{limited_server.server_port}/upload",
+                data=b"ab",
+                method="POST",
+                headers={
+                    "X-LumenLanDrop-Token": "test-token",
+                    "X-LumenLanDrop-SHA256": "not-needed-for-size-rejection",
+                },
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request)
+            self.assertEqual(raised.exception.code, 413)
+            self.assertFalse(limited_output.exists())
+        finally:
+            limited_server.shutdown()
+            limited_server.server_close()
+            limited_thread.join(timeout=2)
 
 
 if __name__ == "__main__":

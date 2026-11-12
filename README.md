@@ -39,9 +39,11 @@ Directories and multiple paths are packed into a regular-file-only tar stream. T
 
 ```text
 lumen-landrop token
-lumen-landrop serve [--host 127.0.0.1] [--port 8765] --token TOKEN --output DIRECTORY
+lumen-landrop serve [--host 127.0.0.1] [--port 8765] --token TOKEN --output DIRECTORY [--max-upload-bytes BYTES]
 lumen-landrop send --to URL --token TOKEN PATH [PATH ...]
 ```
+
+Receivers accept archives up to 10 GiB by default and reject larger declared uploads before creating staging files. Use `--max-upload-bytes` to set a different positive byte limit for a trusted receiver.
 
 ## Security model
 
