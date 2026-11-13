@@ -31,6 +31,8 @@ lumen-landrop send --to http://receiver-host:8765 --token PASTE_TOKEN ~/Videos/e
 
 Directories and multiple paths are packed into a regular-file-only tar stream. The receiver refuses symlinks and unsafe paths, extracts into a temporary directory and atomically publishes one transfer directory after validating the request. Sender and receiver compare the uploaded archive SHA-256.
 
+The sender streams the archive to the receiver in fixed-size chunks rather than loading the complete archive into memory first, so large local transfers remain practical on modest machines.
+
 ## Lumen profile
 
 `lumen-landrop` is portable on macOS, NixOS and other Linux systems. On Lumen Arch it is intended to be preinstalled and pairs with `lumen-media sync-exports`; no Arch-only behavior is required for the base transfer protocol.

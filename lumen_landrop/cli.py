@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import secrets
-import shutil
 import sys
 import tempfile
 import threading
-import urllib.error
-import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,31 +120,43 @@ def serve(host: str, port: int, token: str, output: Path, max_upload_bytes: int 
 
 def send(target: str, token: str, paths: list[str]) -> dict:
     sources = [Path(path).expanduser().resolve() for path in paths]
+    target_parts = urllib.parse.urlsplit(target)
+    if target_parts.scheme not in {"http", "https"} or not target_parts.hostname:
+        raise TransferError("receiver URL must include an http:// or https:// host")
+    if target_parts.query or target_parts.fragment:
+        raise TransferError("receiver URL must not include a query or fragment")
+    try:
+        connection_class = http.client.HTTPSConnection if target_parts.scheme == "https" else http.client.HTTPConnection
+        connection = connection_class(target_parts.hostname, target_parts.port, timeout=60)
+    except ValueError as exc:
+        raise TransferError(f"invalid receiver URL: {exc}") from exc
+    endpoint = (target_parts.path.rstrip("/") + "/upload") or "/upload"
     with tempfile.TemporaryDirectory(prefix="lumen-landrop-") as temporary:
         archive = Path(temporary) / "payload.tar"
         build_archive(sources, archive)
         digest = sha256_file(archive)
-        data = archive.read_bytes()
-    endpoint = target.rstrip("/") + "/upload"
-    request = urllib.request.Request(
-        endpoint,
-        data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/x-tar",
-            "Content-Length": str(len(data)),
-            "X-LumenLanDrop-Token": token,
-            "X-LumenLanDrop-SHA256": digest,
-        },
-    )
+        try:
+            connection.putrequest("POST", endpoint)
+            connection.putheader("Content-Type", "application/x-tar")
+            connection.putheader("Content-Length", str(archive.stat().st_size))
+            connection.putheader("X-LumenLanDrop-Token", token)
+            connection.putheader("X-LumenLanDrop-SHA256", digest)
+            connection.endheaders()
+            with archive.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    connection.send(chunk)
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        except (OSError, http.client.HTTPException) as exc:
+            raise TransferError(f"cannot reach receiver: {exc}") from exc
+        finally:
+            connection.close()
+    if not 200 <= response.status < 300:
+        raise TransferError(f"receiver rejected transfer ({response.status}): {body}")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise TransferError(f"receiver rejected transfer ({exc.code}): {body}") from exc
-    except urllib.error.URLError as exc:
-        raise TransferError(f"cannot reach receiver: {exc.reason}") from exc
+        result = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise TransferError("receiver returned invalid JSON") from exc
     if result.get("sha256") != digest:
         raise TransferError("receiver acknowledgement checksum mismatch")
     return result
