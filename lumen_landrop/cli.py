@@ -30,6 +30,8 @@ class DropServer(ThreadingHTTPServer):
         output: Path,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     ):
+        if not token.strip():
+            raise TransferError("receiver token must not be blank")
         super().__init__(address, handler)
         self.token = token
         self.output = output

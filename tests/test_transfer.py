@@ -26,6 +26,15 @@ class LanDropTests(unittest.TestCase):
         self.thread.join(timeout=2)
         self.temporary.cleanup()
 
+    def test_receiver_requires_a_non_blank_token(self):
+        server = None
+        try:
+            with self.assertRaisesRegex(TransferError, "receiver token must not be blank"):
+                server = DropServer(("127.0.0.1", 0), DropHandler, "   ", self.output)
+        finally:
+            if server is not None:
+                server.server_close()
+
     def test_health_and_directory_transfer(self):
         self.assertEqual(json.loads(urlopen(self.url + "/health").read())["status"], "ok")
         source = Path(self.temporary.name) / "exports"
