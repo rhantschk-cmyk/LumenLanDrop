@@ -35,6 +35,10 @@ class LanDropTests(unittest.TestCase):
             if server is not None:
                 server.server_close()
 
+    def test_sender_requires_a_non_blank_token_before_resolving_paths(self):
+        with self.assertRaisesRegex(TransferError, "sender token must not be blank"):
+            send(self.url, "\t ", [str(Path(self.temporary.name) / "missing")])
+
     def test_health_and_directory_transfer(self):
         self.assertEqual(json.loads(urlopen(self.url + "/health").read())["status"], "ok")
         source = Path(self.temporary.name) / "exports"

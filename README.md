@@ -49,7 +49,7 @@ Receivers accept archives up to 10 GiB by default and reject larger declared upl
 
 ## Security model
 
-A non-blank token authenticates one receiver session. The receiver refuses an empty or whitespace-only token at startup. LAN Drop deliberately does not add encryption; use it only on a trusted LAN or over Tailscale/VPN, or put it behind TLS yourself. Tokens are not written to disk by LAN Drop.
+A non-blank token authenticates one receiver session. Both sender and receiver refuse empty or whitespace-only tokens before reading paths, creating archives, or binding a socket. LAN Drop deliberately does not add encryption; use it only on a trusted LAN or over Tailscale/VPN, or put it behind TLS yourself. Tokens are not written to disk by LAN Drop.
 
 ## Tests
 

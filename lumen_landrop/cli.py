@@ -121,6 +121,8 @@ def serve(host: str, port: int, token: str, output: Path, max_upload_bytes: int 
 
 
 def send(target: str, token: str, paths: list[str]) -> dict:
+    if not token.strip():
+        raise TransferError("sender token must not be blank")
     sources = [Path(path).expanduser().resolve() for path in paths]
     target_parts = urllib.parse.urlsplit(target)
     if target_parts.scheme not in {"http", "https"} or not target_parts.hostname:
