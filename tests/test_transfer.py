@@ -109,6 +109,30 @@ class LanDropTests(unittest.TestCase):
             limited_server.server_close()
             limited_thread.join(timeout=2)
 
+    def test_rejects_invalid_checksum_before_creating_output(self):
+        output = Path(self.temporary.name) / "checksum-received"
+        server = DropServer(("127.0.0.1", 0), DropHandler, "test-token", output)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{server.server_port}/upload",
+                data=b"x",
+                method="POST",
+                headers={
+                    "X-LumenLanDrop-Token": "test-token",
+                    "X-LumenLanDrop-SHA256": "not-a-sha256",
+                },
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request)
+            self.assertEqual(raised.exception.code, 400)
+            self.assertFalse(output.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
 
 if __name__ == "__main__":
     unittest.main()

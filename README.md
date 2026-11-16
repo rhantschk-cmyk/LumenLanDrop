@@ -45,7 +45,7 @@ lumen-landrop serve [--host 127.0.0.1] [--port 8765] --token TOKEN --output DIRE
 lumen-landrop send --to URL --token TOKEN PATH [PATH ...]
 ```
 
-Receivers accept archives up to 10 GiB by default and reject larger declared uploads before creating staging files. Use `--max-upload-bytes` to set a different positive byte limit for a trusted receiver.
+Receivers accept archives up to 10 GiB by default and reject larger declared uploads before creating staging files. They also reject missing or malformed SHA-256 headers before creating receiver output or staging files. Use `--max-upload-bytes` to set a different positive byte limit for a trusted receiver.
 
 ## Security model
 

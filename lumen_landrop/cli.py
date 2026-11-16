@@ -76,6 +76,10 @@ class DropHandler(BaseHTTPRequestHandler):
                 {"error": "upload exceeds receiver size limit"},
             )
             return
+        expected_sha256 = self.headers.get("X-LumenLanDrop-SHA256", "")
+        if len(expected_sha256) != 64 or any(char not in "0123456789abcdef" for char in expected_sha256):
+            self._reply(HTTPStatus.BAD_REQUEST, {"error": "a SHA-256 checksum is required"})
+            return
         self.server.output.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".lumen-landrop-", dir=self.server.output) as temporary:
             staging = Path(temporary) / "payload"
@@ -91,8 +95,7 @@ class DropHandler(BaseHTTPRequestHandler):
                     archive.write(chunk)
                     remaining -= len(chunk)
             actual_sha256 = sha256_file(archive_path)
-            expected_sha256 = self.headers.get("X-LumenLanDrop-SHA256", "")
-            if not expected_sha256 or not secrets.compare_digest(actual_sha256, expected_sha256):
+            if not secrets.compare_digest(actual_sha256, expected_sha256):
                 self._reply(HTTPStatus.BAD_REQUEST, {"error": "archive checksum mismatch"})
                 return
             try:
